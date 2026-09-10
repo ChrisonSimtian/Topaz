@@ -19,6 +19,8 @@ internal sealed class ServiceBusServiceControlPlane(
     SubscriptionControlPlane subscriptionControlPlane,
     ITopazLogger logger) : IControlPlane
 {
+    private const string DefaultRuleName = "$Default";
+
     private const string ServiceBusNamespaceNotFoundCode = "ServiceBusNamespaceNotFound";
 
     private const string ServiceBusNamespaceNotFoundMessageTemplate =
@@ -298,8 +300,25 @@ internal sealed class ServiceBusServiceControlPlane(
             return OperationResult.Failed;
         }
 
-        var result = CreateOrUpdateRule(resource.GetSubscription(), resource.GetResourceGroup(),
-            ServiceBusNamespaceIdentifier.From(segments[0]), segments[1], segments[2], segments[3], properties);
+        var subscription = resource.GetSubscription();
+        var resourceGroup = resource.GetResourceGroup();
+        var @namespace = ServiceBusNamespaceIdentifier.From(segments[0]);
+
+        var result = CreateOrUpdateRule(subscription, resourceGroup, @namespace,
+            segments[1], segments[2], segments[3], properties);
+
+        // A template that declares its own rule means the subscription filters. Leaving the
+        // auto-created $Default true-filter beside it matches everything — MatchesAny returns on the
+        // first match — so the declared filter would be dead weight. The first explicit rule replaces it.
+        if (segments[3] != DefaultRuleName)
+        {
+            var existingDefault = GetRule(subscription, resourceGroup, @namespace,
+                segments[1], segments[2], DefaultRuleName);
+            if (existingDefault is { Result: OperationResult.Success, Resource.Properties.FilterType: "True" })
+            {
+                DeleteRule(subscription, resourceGroup, @namespace, segments[1], segments[2], DefaultRuleName);
+            }
+        }
 
         return result.Result;
     }
@@ -430,7 +449,7 @@ internal sealed class ServiceBusServiceControlPlane(
                 parentId, nameof(Subresource.Subscriptions).ToLowerInvariant(), resource);
 
             CreateOrUpdateRule(subscriptionIdentifier, resourceGroupIdentifier, namespaceIdentifier,
-                topicName, subscriptionName, "$Default", ServiceBusRuleResourceProperties.DefaultTrueFilter());
+                topicName, subscriptionName, DefaultRuleName, ServiceBusRuleResourceProperties.DefaultTrueFilter());
 
             return new ControlPlaneOperationResult<ServiceBusSubscriptionResource>(OperationResult.Created, resource);
         }

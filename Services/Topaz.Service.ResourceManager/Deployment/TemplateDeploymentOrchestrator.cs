@@ -44,6 +44,11 @@ public sealed class TemplateDeploymentOrchestrator(
     ManagementGroupDeploymentResourceProvider mgProvider,
     ITopazLogger logger)
 {
+    private const string NestedDeploymentResourceType = "Microsoft.Resources/deployments";
+
+    /// <summary>Reported to the engine during expansion; only surfaces in its diagnostics.</summary>
+    private const string NestedDeploymentApiVersion = "2022-09-01";
+
     private static readonly List<TemplateDeployment> DeploymentQueue = [];
     private static readonly Lock QueueLock = new();
     private static string? _currentDeploymentId;
@@ -311,7 +316,30 @@ public sealed class TemplateDeploymentOrchestrator(
         var orderedResources = templateDeployment.Template.Resources
             .OrderByDescending(r => (r.Type?.Value ?? string.Empty).Equals("Microsoft.Resources/resourceGroups", StringComparison.OrdinalIgnoreCase))
             .ToList();
-        
+
+        // A nested deployment's resources are produced by the engine's own expansion rather than by
+        // recursing into the inner template by hand. That is what makes `copy` work: expansion resolves
+        // loops at every level, handing back one resource per iteration with copyIndex() already applied.
+        // The expansion returns leaves only — the Microsoft.Resources/deployments entries stay in
+        // orderedResources and are recorded, not provisioned.
+        if (orderedResources.Any(r =>
+                string.Equals(r.Type?.Value, NestedDeploymentResourceType, StringComparison.OrdinalIgnoreCase)))
+        {
+            foreach (var expanded in _armTemplateEngineFacade.ExpandNestedDeployments(
+                         templateDeployment.Template, NestedDeploymentApiVersion))
+            {
+                var expandedResource = expanded;
+                expandedResource.Id = new TemplateGenericProperty<string>
+                {
+                    Value = ArmResourceId.Build(
+                        $"/subscriptions/{deploymentSubscriptionId}/resourceGroups/{deploymentResourceGroupName}",
+                        expandedResource.Type?.Value, expandedResource.Name?.Value)
+                };
+
+                orderedResources.Add(expandedResource);
+            }
+        }
+
         foreach (var resource in orderedResources)
         {
             // Evaluate any remaining ARM expressions in resource.Properties before

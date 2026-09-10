@@ -4,8 +4,11 @@ using Azure.Deployments.Core.Components;
 using Azure.Deployments.Core.Configuration;
 using Azure.Deployments.Core.Definitions.Schema;
 using Azure.Deployments.Core.Diagnostics;
+using Azure.Deployments.Core.Entities;
 using Azure.Deployments.Core.ErrorResponses;
 using Azure.Deployments.Expression.Engines;
+using Azure.Deployments.Expression.Intermediate;
+using Azure.Deployments.Expression.Intermediate.Extensions;
 using Azure.Deployments.Expression.Expressions;
 using Azure.Deployments.Templates.Engines;
 using Microsoft.WindowsAzure.ResourceStack.Common.Collections;
@@ -127,6 +130,67 @@ internal sealed class ArmTemplateEngineFacade(ITopazLogger logger)
 
         EvaluateJTokenExpressions(properties, evalCtx);
     }
+
+    /// <summary>
+    /// Flattens every nested deployment in <paramref name="template"/> into the resources it ultimately
+    /// creates, and returns them as ARM resource JSON.
+    ///
+    /// <para>
+    /// This is the engine's own expansion, so it handles what hand-rolled recursion does not: modules
+    /// nested to any depth, and <c>copy</c> loops at every level — each iteration arrives as its own
+    /// resource with <c>copyIndex()</c> already resolved.
+    /// </para>
+    ///
+    /// <para>
+    /// The result contains only leaf resources. The <c>Microsoft.Resources/deployments</c> entries are
+    /// consumed by expansion and do not come back, so the caller still records those itself.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<TemplateResource> ExpandNestedDeployments(Template template, string deploymentApiVersion)
+    {
+        var expansion = TemplateEngine.ExpandNestedDeploymentsSync(
+            deploymentApiVersion: deploymentApiVersion,
+            deploymentScope: TemplateDeploymentScope.ResourceGroup,
+            template: template);
+
+        foreach (var diagnostic in expansion.Item1)
+        {
+            logger.LogWarning($"Nested deployment expansion: {diagnostic}");
+        }
+
+        var resources = new List<TemplateResource>();
+        foreach (var expanded in expansion.Item2)
+        {
+            var type = AsString(expanded.ResourceType);
+            var name = AsString(expanded.Name);
+            if (type == null || name == null)
+            {
+                logger.LogWarning("Skipping an expanded resource with no type or name.");
+                continue;
+            }
+
+            resources.Add(new TemplateResource
+            {
+                Type = Property(type),
+                Name = Property(name),
+                ApiVersion = Property(AsString(expanded.ApiVersion) ?? deploymentApiVersion),
+                Location = expanded.Location == null ? null : Property(AsString(expanded.Location)!),
+                Properties = expanded.Properties == null
+                    ? null
+                    : new TemplateGenericProperty<JToken> { Value = AsToken(expanded.Properties)! }
+            });
+        }
+
+        return resources;
+    }
+
+    private static TemplateGenericProperty<string> Property(string value) => new() { Value = value };
+
+    /// <summary>The engine hands back parsed expressions; by this point they are literals.</summary>
+    private static JToken? AsToken(ITemplateLanguageExpression? expression) => expression?.SerializeToJToken();
+
+    private static string? AsString(ITemplateLanguageExpression? expression) =>
+        AsToken(expression)?.Type == JTokenType.String ? AsToken(expression)!.Value<string>() : null;
 
     private void EvaluateJTokenExpressions(JToken token, IEvaluationContext evalCtx)
     {

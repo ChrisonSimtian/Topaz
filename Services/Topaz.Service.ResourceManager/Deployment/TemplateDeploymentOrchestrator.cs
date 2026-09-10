@@ -584,9 +584,13 @@ public sealed class TemplateDeploymentOrchestrator(
             // Step 3: Build inner metadata
             var subscriptionMetadata = new SubscriptionMetadata(nestedSubId);
             
-            // Extract parent RG metadata to get location
-            var parentRgMetadata = parentDeployment.Metadata.TryGetValue(DeploymentMetadata.ResourceGroupKey, out var rgMetadataToken)
-                ? JsonSerializer.Deserialize<ResourceGroupMetadata>(rgMetadataToken.ToString(), GlobalSettings.JsonOptions)
+            // Extract the parent resource group's location. Read the property off the token rather than
+            // deserializing ResourceGroupMetadata: that record's only constructor takes identifier types
+            // while its properties are strings, so System.Text.Json cannot bind them and throws. Location
+            // is the only thing needed here.
+            var parentRgLocation = parentDeployment.Metadata.TryGetValue(DeploymentMetadata.ResourceGroupKey, out var rgMetadataToken)
+                                   && rgMetadataToken is JObject rgMetadataObject
+                ? rgMetadataObject[nameof(ResourceGroupMetadata.Location)]?.Value<string>()
                 : null;
 
             AzureLocation nestedLocation;
@@ -594,9 +598,9 @@ public sealed class TemplateDeploymentOrchestrator(
             {
                 nestedLocation = new AzureLocation(genericResource.Location);
             }
-            else if (parentRgMetadata?.Location != null)
+            else if (!string.IsNullOrWhiteSpace(parentRgLocation))
             {
-                nestedLocation = parentRgMetadata.Location;
+                nestedLocation = new AzureLocation(parentRgLocation);
             }
             else if (parentDeployment.Metadata.TryGetValue(DeploymentMetadata.LocationKey, out var parentLocationToken)
                      && parentLocationToken.Type == JTokenType.String

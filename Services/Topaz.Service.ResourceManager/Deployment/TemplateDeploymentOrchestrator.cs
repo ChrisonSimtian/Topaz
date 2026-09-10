@@ -588,9 +588,13 @@ public sealed class TemplateDeploymentOrchestrator(
             // deserializing ResourceGroupMetadata: that record's only constructor takes identifier types
             // while its properties are strings, so System.Text.Json cannot bind them and throws. Location
             // is the only thing needed here.
+            // Case-insensitively: the metadata is serialized with GlobalSettings.JsonOptions, whose
+            // camelCase naming policy does not match the PascalCase property name read here.
             var parentRgLocation = parentDeployment.Metadata.TryGetValue(DeploymentMetadata.ResourceGroupKey, out var rgMetadataToken)
                                    && rgMetadataToken is JObject rgMetadataObject
-                ? rgMetadataObject[nameof(ResourceGroupMetadata.Location)]?.Value<string>()
+                ? rgMetadataObject
+                    .GetValue(nameof(ResourceGroupMetadata.Location), StringComparison.OrdinalIgnoreCase)
+                    ?.Value<string>()
                 : null;
 
             AzureLocation nestedLocation;
